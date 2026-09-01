@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+scikit-learn
+scipy
+pandas
+numpy
+python-multipart
+pydantic
+pytest
+
+# Optional — only needed if you set the corresponding API key for the Q&A agent
+# google-generativeai   # for GEMINI_API_KEY
+# groq                  # for GROQ_API_KEY
+# anthropic             # for ANTHROPIC_API_KEY

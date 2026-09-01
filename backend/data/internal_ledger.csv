@@ -1,0 +1,64 @@
+entry_id,order_ref,merchant,amount,date,narration
+LG5000,ORD10000,Bardoli Agro Traders,1612.98,2026-07-18,Payout - order ORD10000 - NEFT
+LG5001,ORD10001,Bardoli Agro Traders,30610.72,2026-08-04,UPI settlement for order #ORD10001
+LG5002,ORD10002,Bardoli Agro Traders,10229.39,2026-08-02,Txn ORD10002 settled via IMPS
+LG5003,10003,Kiran Electronics,32362.87,2026-08-14,Settled - ref 10003
+LG5004,ORD10004,Om Sai Logistics,26722.32,2026-06-29,Payout - order ORD10004 - NEFT
+LG5005,ORD10005,Patel Auto Parts,7418.84,2026-07-22,UPI settlement for order #ORD10005
+LG5006,ORD10006,Bardoli Agro Traders,16474.58,2026-07-23,Txn ORD10006 settled via IMPS
+LG5007,ORD10007,Sharma Textiles Pvt Ltd,32973.06,2026-08-04,UPI settlement for order #ORD10007
+LG5007DUP,ORD10007,Sharma Textiles Pvt Ltd,32973.06,2026-08-04,UPI settlement for order #ORD10007 (duplicate entry)
+LG5008,10008,Sunrise Bakery Co,3855.59,2026-07-17,Payment ref 10008
+LG5009,ORD10009,Sharma Textiles Pvt Ltd,29926.22,2026-07-19,UPI settlement for order #ORD10009
+LG5010,ORD10010,Bardoli Agro Traders,17415.62,2026-07-30,Settlement batch order ORD10010
+LG5011,ORD10011,Sunrise Bakery Co,9818.84,2026-07-18,UPI settlement for order #ORD10011
+LG5012,ORD10012,Kiran Electronics,7771.41,2026-07-25,Settlement batch order ORD10012
+LG5012DUP,ORD10012,Kiran Electronics,7771.41,2026-07-25,Settlement batch order ORD10012 (duplicate entry)
+LG5013,ORD10013,Diamond City Exports,10272.88,2026-07-21,UPI settlement for order #ORD10013
+LG5014,ORD10014,Sharma Textiles Pvt Ltd,36324.54,2026-07-26,Settlement batch order ORD10014
+LG5015,ORD10015,Nova Retail Solutions,39498.36,2026-07-19,Payout - order ORD10015 - NEFT
+LG5016,ORD10016,Om Sai Logistics,6857.79,2026-07-06,Payout - order ORD10016 - NEFT
+LG5017,ORD10017,Patel Aut0 Parts,33742.11,2026-07-28,Txn ORD10017 settled via IMPS
+LG5018,ORD10018,Om Sai Logistics,4545.47,2026-07-04,UPI settlement for order #ORD10018
+LG5019,ORD10019,Surat Silk House,35747.53,2026-07-28,Txn ORD10019 settled via IMPS
+LG5020,ORD10020,Vraj Enterprises,27017.04,2026-07-30,Txn ORD10020 settled via IMPS
+LG5021,ORD10021,Diamond City Exports,38804.7,2026-06-28,UPI settlement for order #ORD10021
+LG5022,ORD10022,Pstel Auto Parts,34702.64,2026-07-22,UPI settlement for order #ORD10022
+LG5023,10023,Patel Auto Parts,41318.41,2026-07-10,Payment ref 10023
+LG5024,ORD10024,Surat Silk House,17139.17,2026-07-11,Txn ORD10024 settled via IMPS
+LG5024DUP,ORD10024,Surat Silk House,17139.17,2026-07-11,Txn ORD10024 settled via IMPS (duplicate entry)
+LG5025,10025,Diamond City Exports,41372.96,2026-08-08,Settled - ref 10025
+LG5026,ORD10026,Bardoli Agro Traders,41844.89,2026-07-20,Payout - order ORD10026 - NEFT
+LG5027,ORD10027,Nova Retail Solutions,42639.25,2026-07-06,Order ORD10027 payment credited
+LG5028,10028,Surat Silk House,32812.37,2026-07-06,Payment ref 10028
+LG5029,ORD10029,Kiran Electronics,41836.65,2026-08-12,Payout - order ORD10029 - NEFT
+LG5030,ORD10030,Sunrise Bakery Co,19995.45,2026-08-03,Order ORD10030 payment credited
+LG5031,ORD10031,Kiran Electronics,3339.5,2026-07-02,Txn ORD10031 settled via IMPS
+LG5032,ORD10032,Sharma Textiles Pvt Ltd,3659.19,2026-08-10,UPI settlement for order #ORD10032
+LG5033,ORD10033,Sharma Textiles Pvt Ltd,38753.78,2026-07-05,Txn ORD10033 settled via IMPS
+LG5034,ORD10034,Om Sai Logistics,10028.38,2026-07-09,Txn ORD10034 settled via IMPS
+LG5035,ORD10035,Om Sai Logistics,36433.62,2026-07-13,UPI settlement for order #ORD10035
+LG5036,10036,Sharma Textiles Pvt Ltd,15137.91,2026-07-25,Payment ref 10036
+LG5037,ORD10037,Sharma Textiles Pvt Ltd,18416.65,2026-07-22,UPI settlement for order #ORD10037
+LG5038,ORD10038,Kiran Electronics,24364.72,2026-07-09,Order ORD10038 payment credited
+LG5040,ORD10040,Diamond City Exports,4856.94,2026-08-11,Txn ORD10040 settled via IMPS
+LG5041,ORD10041,Bardoli Agro Traders,41723.33,2026-07-16,Payout - order ORD10041 - NEFT
+LG5042,ORD10042,Sharma Textiles Pvt Ltd,7826.35,2026-07-01,Order ORD10042 payment credited
+LG5043,ORD10043,Om Sai Logistics,13193.59,2026-08-12,Txn ORD10043 settled via IMPS
+LG5044,ORD10044,Surat Silk House,8941.41,2026-07-14,UPI settlement for order #ORD10044
+LG5045,ORD10045,Sunrise Bakery Co,3030.76,2026-08-07,Order ORD10045 payment credited
+LG5046,ORD10046,Surat Silk House,3031.14,2026-08-02,UPI settlement for order #ORD10046
+LG5047,ORD10047,Bardoli Agro Traders,26979.06,2026-08-13,Payout - order ORD10047 - NEFT
+LG5048,ORD10048,Nova Retail Solutions,4142.15,2026-08-12,Txn ORD10048 settled via IMPS
+LG5049,ORD10049,Patel Auto Parts,9589.53,2026-08-15,Settlement batch order ORD10049
+LG5050,10050,Vraj Enterprises,6324.08,2026-08-11,Settled - ref 10050
+LG5051,ORD10051,Bardoli Agro Traders,914.54,2026-08-09,Txn ORD10051 settled via IMPS
+LG5051DUP,ORD10051,Bardoli Agro Traders,914.54,2026-08-09,Txn ORD10051 settled via IMPS (duplicate entry)
+LG5052,ORD10052,Bardoli Agro Traders,24424.73,2026-08-02,Settlement batch order ORD10052
+LG5053,ORD10053,Sunrise Bskery Co,39698.46,2026-07-16,Settlement batch order ORD10053
+LG5054,ORD10054,Patel Auto Parts,27719.66,2026-08-11,Txn ORD10054 settled via IMPS
+LG5055,10055,Surat Silk House,13343.86,2026-08-10,Payment ref 10055
+LG5056,ORD10056,Diamond City Exports,7417.43,2026-07-19,Txn ORD10056 settled via IMPS
+LG5057,ORD10057,Sunrise Bakery Co,9554.82,2026-08-10,Settlement batch order ORD10057
+LG5058,ORD10058,Sharma Textiles Pvt Ltd,4607.28,2026-07-28,Settlement batch order ORD10058
+LG5059,ORD10059,Sunrise Bakery Co,34814.81,2026-08-10,Settlement batch order ORD10059
