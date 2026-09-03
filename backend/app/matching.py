@@ -34,9 +34,7 @@ metrics, no cherry-picking"):
 Read-only / analysis-only: this never moves money, only classifies.
 """
 from __future__ import annotations
-import csv
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -50,6 +48,7 @@ from config import (
     AUTO_MATCH_THRESHOLD, NEEDS_REVIEW_THRESHOLD, CANDIDATE_FLOOR,
     STATUS_MATCHED, STATUS_NEEDS_REVIEW, STATUS_EXCEPTION,
 )
+from normalize import load_gateway_records, load_ledger_records, safe_float as _safe_float
 
 
 @dataclass
@@ -64,25 +63,6 @@ class MatchResult:
     signals: dict = field(default_factory=dict)
     gateway_record: dict = field(default_factory=dict)
     ledger_record: dict = field(default_factory=dict)
-
-
-def _load_csv(path):
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def _safe_float(x, default=None):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_date(x):
-    try:
-        return datetime.strptime(x, "%Y-%m-%d")
-    except (TypeError, ValueError):
-        return None
 
 
 def _text_sim_matrix(texts_a, texts_b):
@@ -141,21 +121,25 @@ def _classify(confidence):
     return STATUS_EXCEPTION
 
 
-def reconcile(gateway_path, ledger_path):
-    gateway = _load_csv(gateway_path)
-    ledger = _load_csv(ledger_path)
+def reconcile(gateway_path, ledger_path, gateway_source="synthetic", ledger_source="synthetic"):
+    """gateway_source / ledger_source select which normalize.py adapter reads
+    the CSVs (see normalize.py). Defaults to "synthetic" — today's only
+    registered source — so existing callers are unaffected. This is the seam
+    a future Razorpay source plugs into, without changing anything below."""
+    gateway = load_gateway_records(gateway_path, source=gateway_source)
+    ledger = load_ledger_records(ledger_path, source=ledger_source)
     m, n = len(gateway), len(ledger)
 
-    gw_ref = [r["order_ref"] for r in gateway]
-    lg_ref = [r["order_ref"] for r in ledger]
-    gw_merchant = [r["merchant"] for r in gateway]
-    lg_merchant = [r["merchant"] for r in ledger]
-    gw_narr = [r["narration"] for r in gateway]
-    lg_narr = [r["narration"] for r in ledger]
-    gw_amt = [_safe_float(r["amount"]) for r in gateway]
-    lg_amt = [_safe_float(r["amount"]) for r in ledger]
-    gw_date = [_safe_date(r["date"]) for r in gateway]
-    lg_date = [_safe_date(r["date"]) for r in ledger]
+    gw_ref = [r.order_ref for r in gateway]
+    lg_ref = [r.order_ref for r in ledger]
+    gw_merchant = [r.merchant for r in gateway]
+    lg_merchant = [r.merchant for r in ledger]
+    gw_narr = [r.narration for r in gateway]
+    lg_narr = [r.narration for r in ledger]
+    gw_amt = [r.amount for r in gateway]
+    lg_amt = [r.amount for r in ledger]
+    gw_date = [r.date for r in gateway]
+    lg_date = [r.date for r in ledger]
 
     ref_sim = _text_sim_matrix(gw_ref, lg_ref)
     merchant_sim = _text_sim_matrix(gw_merchant, lg_merchant)
@@ -188,10 +172,11 @@ def reconcile(gateway_path, ledger_path):
     results = []
     used_ledger = set(matched_pairs.values())
 
-    for i, gw in enumerate(gateway):
+    for i, gw_norm in enumerate(gateway):
+        gw = gw_norm.raw  # original raw row — output contract (gateway_record) is unchanged
         if i in matched_pairs:
             j = matched_pairs[i]
-            ld = ledger[j]
+            ld = ledger[j].raw
             conf = float(confidence[i, j])
             status = _classify(conf)
             amt_diff = None
@@ -251,8 +236,9 @@ def reconcile(gateway_path, ledger_path):
                 signals={}, gateway_record=gw, ledger_record={},
             ))
 
-    for j, ld in enumerate(ledger):
+    for j, ld_norm in enumerate(ledger):
         if j not in used_ledger:
+            ld = ld_norm.raw  # original raw row — output contract (ledger_record) is unchanged
             results.append(MatchResult(
                 gateway_id="", ledger_id=ld["entry_id"], order_ref=ld["order_ref"],
                 status=STATUS_EXCEPTION, confidence=0.0, method="none",
@@ -270,8 +256,8 @@ def reconcile(gateway_path, ledger_path):
     def amt_of(r):
         return _safe_float(r.gateway_record.get("amount") or r.ledger_record.get("amount"), 0) or 0
 
-    gateway_total = round(sum(_safe_float(r["amount"], 0) or 0 for r in gateway), 2)
-    ledger_total = round(sum(_safe_float(r["amount"], 0) or 0 for r in ledger), 2)
+    gateway_total = round(sum(r.amount or 0 for r in gateway), 2)
+    ledger_total = round(sum(r.amount or 0 for r in ledger), 2)
     matched_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_MATCHED), 2)
     needs_review_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_NEEDS_REVIEW), 2)
     exception_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_EXCEPTION), 2)
