@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from matching import reconcile
 from qa_agent import ask as qa_ask
 from validation import validate_csv
+from razorpay_client import (
+    test_connection as razorpay_test_connection,
+    RazorpayConfigError, RazorpayAuthError, RazorpayAPIError,
+)
 import store
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -101,6 +105,26 @@ def _batch_view(batch: dict) -> dict:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+# ---- Razorpay TEST MODE connection check -----------------------------------
+# Step 3 scope: credential/connectivity check ONLY. Does not fetch or
+# reconcile any Razorpay data, and does not touch matching.py/normalize.py.
+# All Razorpay-specific logic lives in razorpay_client.py.
+
+@app.get("/api/razorpay/test-connection")
+def razorpay_connection_check():
+    """Confirms RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET (read from environment
+    variables only) are present, look like TEST mode keys, and are accepted
+    by Razorpay. Never returns the secret to the caller."""
+    try:
+        return razorpay_test_connection()
+    except RazorpayConfigError as e:
+        raise HTTPException(400, str(e))
+    except RazorpayAuthError as e:
+        raise HTTPException(401, str(e))
+    except RazorpayAPIError as e:
+        raise HTTPException(502, str(e))
 
 
 # ---- Upload & validation ---------------------------------------------------
