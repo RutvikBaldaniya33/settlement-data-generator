@@ -20,7 +20,10 @@ from qa_agent import ask as qa_ask
 from validation import validate_csv
 from razorpay_client import (
     test_connection as razorpay_test_connection,
-    RazorpayConfigError, RazorpayAuthError, RazorpayAPIError,
+    fetch_payments as razorpay_fetch_payments,
+    RazorpayConfigError,
+    RazorpayAuthError,
+    RazorpayAPIError,
 )
 import store
 
@@ -311,3 +314,17 @@ def ask_question(req: AskRequest, batch_id: str = None):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+@app.get("/api/razorpay/payments")
+def razorpay_payments(count: int = 10):
+    try:
+        return razorpay_fetch_payments(count)
+
+    except RazorpayConfigError as e:
+        raise HTTPException(400, str(e))
+
+    except RazorpayAuthError as e:
+        raise HTTPException(401, str(e))
+
+    except RazorpayAPIError as e:
+        raise HTTPException(502, str(e))

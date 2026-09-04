@@ -131,3 +131,67 @@ def test_connection() -> dict:
     raise RazorpayAPIError(
         f"Razorpay API returned HTTP {resp.status_code}" + (f": {detail}" if detail else ".")
     )
+
+def fetch_payments(count: int = 10) -> dict:
+    """Fetch payment records from Razorpay TEST mode.
+
+    Returns the raw Razorpay response in a controlled form.
+    The API credentials are never returned.
+
+    Raises:
+        RazorpayConfigError - credentials missing/invalid
+        RazorpayAuthError   - Razorpay rejected credentials
+        RazorpayAPIError    - network/API failure
+    """
+    key_id, key_secret = _get_credentials()
+
+    if count < 1 or count > 100:
+        raise RazorpayConfigError("count must be between 1 and 100.")
+
+    try:
+        resp = requests.get(
+            f"{RAZORPAY_API_BASE}/payments",
+            params={"count": count},
+            auth=(key_id, key_secret),
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.Timeout:
+        raise RazorpayAPIError(
+            "Timed out connecting to Razorpay. Check your network and try again."
+        )
+    except requests.exceptions.ConnectionError:
+        raise RazorpayAPIError(
+            "Could not reach Razorpay's API (connection error). Check your network."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RazorpayAPIError(f"Unexpected error contacting Razorpay: {e}")
+
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RazorpayAPIError(
+                "Razorpay returned an invalid JSON response."
+            )
+
+        return {
+            "mode": "test",
+            "count": len(data.get("items", [])),
+            "items": data.get("items", []),
+        }
+
+    if resp.status_code in (401, 403):
+        raise RazorpayAuthError(
+            "Razorpay rejected the configured credentials."
+        )
+
+    detail = None
+    try:
+        detail = resp.json().get("error", {}).get("description")
+    except ValueError:
+        pass
+
+    raise RazorpayAPIError(
+        f"Razorpay API returned HTTP {resp.status_code}"
+        + (f": {detail}" if detail else ".")
+    )
