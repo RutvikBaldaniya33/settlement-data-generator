@@ -7,6 +7,7 @@ numpy
 python-multipart
 pydantic
 pytest
+requests
 
 # Optional — only needed if you set the corresponding API key for the Q&A agent
 # google-generativeai   # for GEMINI_API_KEY

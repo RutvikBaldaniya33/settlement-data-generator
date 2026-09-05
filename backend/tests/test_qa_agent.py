@@ -72,3 +72,57 @@ def test_unrecognized_question_does_not_crash():
 def test_empty_batch_does_not_crash():
     out = ask("What is the match rate?", [])
     assert "0.0%" in out["answer"] or "0 of 0" in out["answer"]
+
+
+# --------------------------------------------------------------------------
+# AI Finance Controller: batch priority analysis
+# --------------------------------------------------------------------------
+
+def _row_with_signals(order_ref, status, gw_amount, ld_amount, amount_diff,
+                       merchant="Acme Co", reason="test reason"):
+    return {
+        "order_ref": order_ref, "current_status": status, "status": status,
+        "confidence": 0.5, "method": "matched_pair", "reason": reason,
+        "signals": {"amount_difference": amount_diff, "date_difference_days": 0},
+        "gateway_record": {"merchant": merchant, "amount": str(gw_amount)},
+        "ledger_record": {"merchant": merchant, "amount": str(ld_amount)},
+    }
+
+
+def test_batch_analysis_uses_real_counts_no_invention():
+    rows = [
+        _row("ORD1", STATUS_MATCHED),
+        _row("ORD2", STATUS_MATCHED),
+        _row_with_signals("ORD3", STATUS_NEEDS_REVIEW, 50000, 5000, 45000),
+        _row("ORD4", STATUS_EXCEPTION, method="none"),
+    ]
+    out = ask("Analyze this batch and tell me what needs my attention.", rows)
+    assert out["used_llm"] is False  # always deterministic - never invented
+    assert "Total records: 4" in out["answer"]
+    assert "Matched: 2" in out["answer"]
+    assert "Needs Review: 1" in out["answer"]
+    assert "Exceptions: 1" in out["answer"]
+
+
+def test_batch_analysis_priority_reason_reflects_real_signals():
+    rows = [_row_with_signals("ORD3", STATUS_NEEDS_REVIEW, 50000, 5000, 45000)]
+    out = ask("What needs my attention in this batch?", rows)
+    assert "ORD3" in out["answer"]
+    assert "50000" in out["answer"]
+    assert "5000" in out["answer"]
+    assert "45000" in out["answer"]
+    assert "Human review required." in out["answer"]
+
+
+def test_batch_analysis_missing_ledger_record_recommendation():
+    r = _row("ORD5", STATUS_EXCEPTION, method="none")
+    r["ledger_record"] = {}
+    out = ask("Analyze this batch", [r])
+    assert "No matching ledger record found" in out["answer"]
+    assert "Investigate ledger entry." in out["answer"]
+
+
+def test_batch_analysis_reports_nothing_needs_attention_when_all_matched():
+    rows = [_row("ORD1", STATUS_MATCHED), _row("ORD2", STATUS_MATCHED)]
+    out = ask("Analyze this batch and tell me what needs my attention.", rows)
+    assert "No records currently need attention" in out["answer"]

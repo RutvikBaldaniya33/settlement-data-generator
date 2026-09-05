@@ -6,6 +6,7 @@ decide -> audit trail -> ask questions. Read-only / analysis-only: this
 service never initiates a payout, refund, or ledger write.
 """
 import os
+import re
 import sys
 import traceback
 
@@ -153,7 +154,7 @@ def razorpay_reconcile(
     CSV upload flow uses — so it immediately works with batch detail,
     human review, audit trail, re-run (where supported), and dashboard
     batch loading, with no special-casing needed anywhere else. The
-    gateway source is recorded as "razorpay"; the ledger source is
+    gateway source is recorded as "Razorpay TEST"; the ledger source is
     recorded as the existing default demo ledger file, same as the
     default CSV batch. Never returns Razorpay credentials — only
     Razorpay's own (non-secret) payment data and the reconciliation
@@ -171,7 +172,7 @@ def razorpay_reconcile(
     ledger_records = load_ledger_records(DEFAULT_LEDGER_CSV, source="synthetic")
 
     out = reconcile_records(gateway_records, ledger_records)
-    batch = store.create_batch(out, "razorpay", "internal_ledger.csv (default)")
+    batch = store.create_batch(out, "Razorpay TEST", "internal_ledger.csv (default)")
     return _batch_view(batch)
 
 
@@ -340,7 +341,36 @@ def get_audit_trail(batch_id: str = None):
     return {"audit_trail": store.get_audit_trail(batch_id)}
 
 
-# ---- Q&A --------------------------------------------------------------------
+# ---- Q&A / AI Finance Controller ---------------------------------------
+# The agent's read/analyze side lives in qa_agent.py (retrieval + grounded
+# answers over real batch data). Actions are handled here, since this is
+# where the existing store/review mechanism already lives - the agent
+# never touches store state directly; it can only trigger the SAME
+# record_decision() function the manual review UI uses, via a fixed set of
+# supported decisions, so it can't perform an arbitrary/unsafe action.
+
+_ACTION_DECISION_PATTERNS = [
+    (re.compile(r"\b(confirm|approve)\b.*\bmatch", re.I), "confirm_match"),
+    (re.compile(r"\bmark\b.*\bexception", re.I), "mark_exception"),
+    (re.compile(r"\bkeep\b.*\breview", re.I), "keep_for_review"),
+]
+_ORDER_REF_RE = re.compile(r"\bORD-?\d+\b", re.I)
+
+
+def _detect_review_action(question: str):
+    """Parses an explicit action request like 'Mark ORD1003 as an
+    exception' out of free text. Returns (order_ref, decision) or
+    (None, None) if this isn't an action request - a plain regex match
+    against the existing fixed decision set, not an LLM decision."""
+    m = _ORDER_REF_RE.search(question)
+    if not m:
+        return None, None
+    order_ref = m.group(0).upper().replace("-", "")
+    for pattern, decision in _ACTION_DECISION_PATTERNS:
+        if pattern.search(question):
+            return order_ref, decision
+    return None, None
+
 
 @app.post("/api/ask")
 def ask_question(req: AskRequest, batch_id: str = None):
@@ -353,6 +383,31 @@ def ask_question(req: AskRequest, batch_id: str = None):
     # original system_status, so answers reflect reality.
     for r in results:
         r["status"] = r["current_status"]
+
+    order_ref, decision = _detect_review_action(req.question)
+    if order_ref and decision:
+        match = next((r for r in results
+                      if r["order_ref"].upper().replace("-", "") == order_ref), None)
+        if match is None:
+            return {"question": req.question,
+                    "answer": f"I couldn't find {order_ref} in this batch, so no action was taken.",
+                    "used_llm": False, "retrieval_mode": "action_not_found",
+                    "source_records": [], "retrieved_count": 0}
+        previous_status = match["current_status"]
+        updated = store.record_decision(batch["id"], match["result_key"], decision, reviewer="ai_agent")
+        if updated is None:
+            return {"question": req.question,
+                    "answer": f"Could not apply that decision to {order_ref}.",
+                    "used_llm": False, "retrieval_mode": "action_failed",
+                    "source_records": [order_ref], "retrieved_count": 0}
+        label = {"confirm_match": "confirmed as MATCHED", "mark_exception": "marked as EXCEPTION",
+                  "keep_for_review": "kept as NEEDS_REVIEW"}[decision]
+        return {"question": req.question,
+                "answer": (f"{order_ref} was {label} (previous status: {previous_status}). "
+                           f"Recorded in the audit trail."),
+                "used_llm": False, "retrieval_mode": "action_" + decision,
+                "source_records": [order_ref], "retrieved_count": 1}
+
     return qa_ask(req.question, results)
 
 

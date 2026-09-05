@@ -1,717 +1,205 @@
 # SettleSense
 
-### Razorpay AI Buildathon — Track 04: AI Finance Controller
+**Razorpay AI Buildathon — Track 04: AI Finance Controller**
 
-SettleSense is an AI-assisted finance reconciliation system that compares payment gateway records with an internal ledger and helps finance teams find mismatches quickly.
+An agent that reconciles gateway settlements against internal ledger records, classifies every pair as MATCHED / NEEDS_REVIEW / EXCEPTION with a transparent, multi-signal explanation, lets a human operator review and decide on the ambiguous ones, keeps an immutable audit trail, and answers plain-English questions about the batch — grounded in the actual data, never invented. An **AI Finance Controller** layer on top can analyze a batch, prioritize and explain what needs attention, and — only when explicitly asked — apply the same supported review decisions a human would, through the existing audit trail. It can also pull real payments straight from **Razorpay TEST mode** and reconcile them the same way as an uploaded CSV.
 
-It does not move money, make payments, issue refunds, or modify financial records.
-
-It only:
-- compares records
-- finds mismatches
-- explains why records do not match
-- allows a human to review uncertain cases
-- keeps an audit trail
-- answers questions about the reconciliation batch
+Read-only / analysis-only by design. **It never moves money** — no payouts, no refunds, no ledger writes. It classifies and explains; a human (or a separately gated action system) executes.
 
 ---
 
-## What Problem Does SettleSense Solve?
+## 1. What SettleSense does
 
-Finance teams often need to compare two sources of financial data:
+Finance ops teams reconcile settlement records by hand because the join key rarely lines up cleanly: typos in merchant names, truncated references, gateway fees shaving a few rupees off the amount, settlement dates that lag ledger bookings, and — the case that breaks naive reconciliation scripts — a reference ID that matches perfectly while the amount is completely wrong.
 
-**Payment Gateway**
+SettleSense:
+1. Scores every gateway/ledger pair on **five independent signals**, not just "does the reference match."
+2. Resolves the whole batch as a **global one-to-one assignment problem** (Hungarian algorithm), so no ledger record is silently claimed by two gateway records.
+3. Classifies each pair as **MATCHED / NEEDS_REVIEW / EXCEPTION** by threshold on the combined score — never by an unexplained special case.
+4. Gives a human a **side-by-side review workspace** for anything ambiguous, with buttons to confirm, reject, or defer — and never silently auto-corrects on its own.
+5. Keeps every event — system classification and human decision alike — in an **audit trail**.
+6. Answers questions about the batch through a **Q&A agent** grounded in the actual results; counts and totals are computed by the engine, never estimated by an LLM.
 
-```text
-Gateway
-   ↓
-Payment / Settlement Records
+---
 
-Internal Ledger
+## 2. Problem statement (why exact-reference matching is not enough)
 
+A naive reconciliation script joins on `order_ref` and calls it done. This fails, or worse, silently "succeeds" incorrectly, on cases like:
 
+> Gateway: `ORD10001`, ₹50,000
+> Ledger: `ORD10001`, ₹5,000
 
-Internal System
-   ↓
-Ledger Records
+Same reference — but a 10x amount mismatch. A naive script marks this **MATCHED**. SettleSense does not: the reference signal contributes its configured weight (30%) like every other signal, so a wrong amount drags the combined confidence down and the pair lands in **NEEDS_REVIEW** or **EXCEPTION** instead. This exact scenario is covered by `test_exact_reference_but_huge_amount_mismatch_is_not_auto_matched` in the test suite.
 
-The same transaction may not look exactly the same in both systems.
+---
 
-For example:
+## 3. Architecture
 
+```
+backend/
+  app/
+    config.py       every threshold & weight, with reasoning inline
+    data_gen.py      synthetic gateway + ledger data generator with
+                     deliberately injected mismatch scenarios (see §7)
+    normalize.py     common NormalizedRecord shape + per-source adapters
+                     (synthetic CSV, Razorpay payment) feeding matching.py
+    matching.py      the reconciliation engine (see §4)
+    validation.py    CSV upload validation
+    store.py         in-memory batch + audit-trail store (see §8, limitation)
+    qa_agent.py       AI Finance Controller: retrieval-grounded Q&A,
+                      batch analysis/prioritization (see §6)
+    razorpay_client.py  Razorpay TEST-mode API client (fetch only —
+                        credentials never leave this file)
+    main.py          FastAPI app — all endpoints, incl. review actions
+                     triggered from chat (see §9)
+  tests/
+    test_matching.py, test_matching_scenarios.py   scoring, assignment, 15 scenarios
+    test_qa_agent.py, test_ai_finance_controller.py   Q&A, analysis, chat-driven actions
+    test_razorpay_client.py, test_razorpay_reconcile.py   Razorpay fetch/normalize/reconcile
+    test_audit_trail.py    audit metadata correctness (synthetic + Razorpay)
+    test_validation.py     CSV validation, malformed input
+    99 tests total, all passing (see §11)
+  data/              generated CSVs
+  requirements.txt
 
+frontend/
+  pages/index.js     dashboard: upload, KPIs, filterable record tables,
+                      human review modal, audit trail tab, Q&A chat
+  styles/globals.css
+```
 
-Gateway
-Order: ORD10001
-Amount: ₹50,000
+---
 
-Ledger
-Order: ORD10001
-Amount: ₹5,000
+## 4. Matching methodology
 
-The order reference is the same, but the amount is completely different.
+Every gateway/ledger pair is scored on five signals, each 0.0–1.0:
 
-A simple system that only checks the order reference could incorrectly mark this as a match.
+| Signal | What it measures | Method |
+|---|---|---|
+| `reference` | order reference similarity | character n-gram TF-IDF cosine (robust to single-char typos) |
+| `merchant` | merchant name similarity | same |
+| `narration` | free-text description similarity | same |
+| `amount` | amount closeness | tolerance band (₹20 absolute or 0.5% relative, whichever larger) scoring 1.0, decaying linearly to 0.0 by 5x that tolerance |
+| `date` | settlement vs. booking date closeness | 4-day tolerance window scoring 1.0, decaying linearly to 0.0 by 3x that window |
 
-SettleSense looks at multiple signals before making a decision.
+**Confidence** = `0.30·reference + 0.15·merchant + 0.15·narration + 0.25·amount + 0.15·date`. Weights and tolerances live in `config.py`. An exact reference match alone contributes only 0.30 of the 0.85 auto-match bar — it cannot force a MATCHED status by itself.
 
-How SettleSense Works
+**Assignment**: pairwise scores form a gateway x ledger matrix, resolved by `scipy.optimize.linear_sum_assignment` (Hungarian algorithm) — the globally optimal one-to-one pairing, not a greedy first-best loop. Pairs below `CANDIDATE_FLOOR` (0.35) are excluded before assignment.
 
+**Status**: `>= 0.85` MATCHED, `>= 0.55` NEEDS_REVIEW, below that EXCEPTION. No other code path assigns status.
 
+**Accurate language**: an unmatched record gets *"No eligible ledger candidate was found within the configured matching constraints... Possible causes: missing ledger booking, incorrect reference, or a mismatch beyond configured tolerances"* — stating what the engine can prove, not asserting facts (like "never booked internally") it has no way to verify.
 
-Gateway Records
-       │
-       ▼
-   Normalize
-       │
-       ▼
-Internal Ledger ──► Normalize
-       │
-       ▼
- Matching Engine
-       │
-       ├── MATCHED
-       ├── NEEDS_REVIEW
-       └── EXCEPTION
-       │
-       ▼
- Human Review
-       │
-       ▼
-   Audit Trail
-       │
-       ▼
- Q&A / Dashboard
+---
 
-The system can work with demo CSV data and can also fetch payment data from the Razorpay TEST API.
+## 5. Human review workflow
 
-Matching Engine
+Any `NEEDS_REVIEW` record opens a comparison view: gateway vs. ledger record side by side with mismatched fields highlighted, the full signal breakdown, and the system's reasoning. The operator picks **Confirm Match**, **Mark Exception**, or **Keep for Review** — this only records a decision, never a financial action. `system_status` (original recommendation) is preserved forever alongside `current_status` (post-review).
 
-SettleSense does not depend on one field.
+---
 
-Each gateway/ledger pair is evaluated using five signals:
+## 6. AI Finance Controller (analysis, explanation & actions)
 
-Signal
+Built on top of the existing Q&A retrieval engine — same grounding rules, no separate/duplicate system. Supports, all verified in `test_qa_agent.py` / `test_ai_finance_controller.py`:
+- **Batch analysis**: *"Analyze this batch and tell me what needs my attention"* → real total/matched/needs-review/exception counts, plus the top priority NEEDS_REVIEW/EXCEPTION records ranked by amount difference, each with a reason built only from that record's real signals (reference/merchant/narration similarity, amount difference, date difference) and a status-derived recommendation ("Human review required.", "Investigate ledger entry.", etc.) — never an invented explanation.
+- **Explicit actions via chat**: *"Mark ORD10023 as an exception"* / *"Confirm the match for ORD10056"* / *"Keep ORD10099 for review"* — parsed by a fixed regex against the same three decisions the review UI supports, applied through the existing `store.record_decision()`, and logged to the same audit trail. A non-existent order ref returns a clear "not found," never a fabricated success.
+- Direct record lookup: *"Why is ORD10056 an exception?"*
+- Exact aggregate answers computed by the engine: *"What's the match rate?"*, *"How many need review?"*, *"How much is in exception?"* — including the honest zero-count case ("0 records currently need review") instead of silently substituting unrelated records.
+- Filtered queries: amount mismatch thresholds, date drift thresholds, highest-exception merchant, low-confidence matches.
+- Free-form fallback via TF-IDF similarity.
 
-What it checks
+LLM usage (Gemini/Groq/Claude, via env var) is optional and bounded — it phrases free-form answers from pre-retrieved records, but batch analysis, actions, and every count/rate/total question are always computed/executed deterministically, never left to the model, so they can't be arithmetically wrong or perform an unintended action. Every answer reports `source_records` and `used_llm` so provenance is never hidden.
 
-Reference
+---
 
-Order/payment reference similarity
+## 7. Demo dataset
 
-Merchant
+`data_gen.py` generates ~60 gateway + ~63 ledger records with: clean matches, typo'd references/merchants/narrations, truncated references, gateway-fee amount deltas, date drift, a stacked low-confidence scenario, a duplicate ledger booking, and orphan records on both sides. Result on a generated batch: **78.1% match rate**, ~1 needing review, ~13 genuine exceptions — deliberately not 100%.
 
-Merchant name similarity
+---
 
-Narration
+## 8. Razorpay TEST integration
 
-Description/text similarity
+`razorpay_client.py` is the only module that talks to Razorpay — it reads `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` from environment variables only, refuses to run against a `rzp_live_` key, and never logs or returns the secret. `GET /api/razorpay/reconcile?count=N` fetches N recent TEST-mode payments, normalizes each via `normalize.py`'s Razorpay adapter (paise → rupees, Razorpay's field names → the same `NormalizedRecord` shape the synthetic CSV adapter produces), and runs them through the **same, unmodified** `matching.py` engine against the existing default ledger — then persists the result as a normal batch via the existing `store.create_batch()`, so it immediately works with batch detail, human review, and the audit trail like any CSV-uploaded batch. The dashboard's "Run Razorpay TEST Reconciliation" button makes that batch the active one on screen, the same way uploading a new CSV batch does.
 
-Amount
+---
 
-Difference between amounts
+## 9. Batch model & audit trail
 
-Date
+Each run is a **batch** (`BATCH-YYYYMMDD-HHMMSS-xxxxxx`) storing source filenames, counts, results, and a live summary reflecting human decisions. The **audit trail** is an append-only log of every event (system classification and human decision alike) with timestamp, IDs, previous/new status, system recommendation, human decision, and reason.
 
-Difference between settlement and booking dates
+**Known limitation**: the store is an in-memory Python dict — state resets on restart. This is a documented MVP simplification; swapping in SQLite/Postgres would keep the same shape.
 
-The signals are combined into a confidence score:
+---
 
+## 10. API endpoints
 
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | liveness |
+| POST | `/api/validate?kind=gateway\|ledger` | validate a CSV before committing |
+| POST | `/api/batches` | upload CSVs → validate → reconcile → create batch |
+| GET | `/api/batches` / `/api/batches/{id}` | list / detail |
+| POST | `/api/batches/{id}/rerun` | re-run as a new batch (never mutates the old one) |
+| GET | `/api/reconcile` | latest batch's summary + results |
+| GET | `/api/results` | search & filter: `status`, `search`, `merchant`, `min_confidence`, `max_confidence`, `amount_mismatch_only`, `date_mismatch_only` |
+| GET | `/api/exceptions` / `/api/needs-review` | status shortcuts |
+| POST | `/api/batches/{id}/review` | human decision |
+| GET | `/api/audit-trail` | full log |
+| POST | `/api/ask` | AI Finance Controller: Q&A, batch analysis, and chat-driven review actions |
+| GET | `/api/razorpay/test-connection` | verify Razorpay TEST credentials/connectivity |
+| GET | `/api/razorpay/reconcile?count=N` | fetch N Razorpay TEST payments → normalize → reconcile → create batch |
 
-Confidence =
-0.30 × Reference
-+ 0.15 × Merchant
-+ 0.15 × Narration
-+ 0.25 × Amount
-+ 0.15 × Date
+All unhandled exceptions are caught globally and returned as a generic message — no raw Python traceback ever reaches the client.
 
-The weights and matching thresholds are configurable in config.py.
+---
 
-An exact reference match is not enough to automatically become a match.
+## 11. Running it
 
-One-to-One Matching
-
-After calculating pairwise scores, SettleSense solves the complete matching problem using the Hungarian algorithm.
-
-This makes the assignment global and one-to-one.
-
-In simple terms:
-
-
-
-Gateway A ───── Ledger 1
-Gateway B ───── Ledger 2
-Gateway C ───── Ledger 3
-
-A single ledger record cannot silently be assigned to multiple gateway records.
-
-Low-confidence candidates are removed before assignment.
-
-Result Classification
-
-Every record receives one of three statuses:
-
-
-
-MATCHED
-NEEDS_REVIEW
-EXCEPTION
-
-Current thresholds:
-
-ConfidenceStatus
-
-
-
-≥ 0.85
-
-MATCHED
-
-≥ 0.55
-
-NEEDS_REVIEW
-
-< 0.55
-
-EXCEPTION
-
-These thresholds are defined in the backend configuration.
-
-Human Review
-
-Not every reconciliation decision should be automated.
-
-When a record needs review, the dashboard shows:
-
-Gateway record
-
-Ledger record
-
-Mismatched fields
-
-Signal scores
-
-Confidence
-
-System reasoning
-
-The reviewer can choose:
-
-
-
-Confirm Match
-Mark Exception
-Keep for Review
-
-Human review only changes the reconciliation status.
-
-It does not perform any financial action.
-
-The original system recommendation is preserved as system_status, while the current decision is stored as current_status.
-
-Audit Trail
-
-Every important action is recorded in an append-only audit trail.
-
-Examples:
-
-
-
-batch_created
-system_classification
-human_review
-
-The audit information includes:
-
-timestamp
-
-batch ID
-
-record ID
-
-previous status
-
-new status
-
-system recommendation
-
-human decision
-
-reason
-
-This makes it possible to understand how a reconciliation result was produced.
-
-Q&A
-
-SettleSense includes a Q&A interface for asking questions about the current reconciliation batch.
-
-Examples:
-
-
-
-What's the match rate?
-
-How many records need review?
-
-How much money is in exceptions?
-
-Why is ORD10056 an exception?
-
-Important design decision:
-
-The system does not ask an LLM to calculate financial totals.
-
-Counts, rates and totals are calculated directly from the reconciliation results.
-
-An optional LLM can be used to explain retrieved information in natural language.
-
-The Q&A response also keeps track of:
-
-
-
-source_records
-used_llm
-
-so the answer has clear provenance.
-
-Razorpay TEST Integration
-
-SettleSense can connect to the Razorpay TEST API.
-
-The integration:
-
-Connects using Razorpay TEST credentials
-
-Fetches payment records
-
-Normalizes the Razorpay response
-
-Converts payment amounts into the internal amount format
-
-Reconciles the data against the internal ledger
-
-Creates a normal SettleSense batch
-
-Shows the results in the dashboard
-
-Records the batch in the audit trail
-
-The integration uses environment variables:
-
-
-
-RAZORPAY_KEY_ID
-RAZORPAY_KEY_SECRET
-
-Only Razorpay TEST keys are accepted.
-
-Live Razorpay keys are intentionally rejected.
-
-Never commit .env or real credentials to GitHub.
-
-Dashboard
-
-The dashboard provides:
-
-Total Records
-
-Match Rate
-
-Needs Review count
-
-Exception count
-
-Gateway Total
-
-Ledger Total
-
-Gateway/Ledger Difference
-
-Exception Amount
-
-It also provides tabs for:
-
-
-
-Exceptions
-Needs Review
-Matched
-All Records
-Audit Trail
-
-Records can be searched and filtered by different mismatch conditions.
-
-Project Structure
-
-
-
-settlesense/
-│
-├── backend/
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── matching.py
-│   │   ├── normalize.py
-│   │   ├── config.py
-│   │   ├── qa_agent.py
-│   │   ├── data_gen.py
-│   │   ├── razorpay_client.py
-│   │   └── store.py
-│   │
-│   ├── data/
-│   │   ├── gateway_settlements.csv
-│   │   └── internal_ledger.csv
-│   │
-│   ├── tests/
-│   │   ├── test_matching.py
-│   │   ├── test_matching_scenarios.py
-│   │   ├── test_qa_agent.py
-│   │   ├── test_validation.py
-│   │   ├── test_razorpay_client.py
-│   │   └── test_razorpay_reconcile.py
-│   │
-│   └── requirements.txt
-│
-├── frontend/
-│   ├── pages/
-│   │   ├── _app.js
-│   │   └── index.js
-│   │
-│   ├── styles/
-│   │   └── globals.css
-│   │
-│   ├── package.json
-│   └── next.config.js
-│
-├── .env.example
-├── .gitignore
-└── README.md
-
-API
-
-Main API endpoints:
-
-Method
-
-Endpoint
-
-Purpose
-
-GET
-
-/api/health
-
-Check backend health
-
-POST
-
-/api/validate
-
-Validate gateway/ledger CSV
-
-POST
-
-/api/batches
-
-Upload and reconcile CSV files
-
-GET
-
-/api/batches
-
-List batches
-
-GET
-
-/api/batches/{id}
-
-Get batch details
-
-POST
-
-/api/batches/{id}/rerun
-
-Re-run reconciliation
-
-GET
-
-/api/reconcile
-
-Get latest reconciliation
-
-GET
-
-/api/results
-
-Search and filter results
-
-GET
-
-/api/exceptions
-
-Get exception records
-
-GET
-
-/api/needs-review
-
-Get records needing review
-
-POST
-
-/api/batches/{id}/review
-
-Submit human review
-
-GET
-
-/api/audit-trail
-
-Get audit events
-
-POST
-
-/api/ask
-
-Ask questions about the batch
-
-GET
-
-/api/razorpay/reconcile
-
-Fetch Razorpay TEST payments and reconcile
-
-Running the Project
-
-1. Backend
-
-Open PowerShell:
-
-
-
+**Backend:**
+```bash
 cd backend
 pip install -r requirements.txt
 python app/data_gen.py
 uvicorn app.main:app --reload --port 8000
+```
 
-Backend:
+**Tests:** `cd backend && python -m pytest tests/ -v` (99 tests, all passing)
 
-
-
-http://localhost:8000
-
-API documentation:
-
-
-
-http://localhost:8000/docs
-
-2. Frontend
-
-Open another terminal:
-
-
-
+**Frontend:**
+```bash
 cd frontend
 npm install
 npm run dev
+```
+Open `http://localhost:3000`.
 
-Frontend:
+**Optional LLM for Q&A** (works correctly without one): `export GEMINI_API_KEY=...` (or `GROQ_API_KEY` / `ANTHROPIC_API_KEY`)
 
+**Razorpay TEST integration** (optional — dashboard/tests work fine without it): copy `backend/.env.example` to `backend/.env` and fill in your Razorpay **TEST mode** `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`. A live-mode key (`rzp_live_...`) is refused by design.
 
+---
 
-http://localhost:3000
+## 12. What broke, and how I got out of it
 
-Razorpay TEST Setup
+1. **Fuzzy matching was never actually exercised.** The first data generator kept `order_ref` identical across every mismatch scenario, so every "hard" case still exact-matched on the join key. Fixed by corrupting the join key itself in typo/partial-ref scenarios and switching to character n-gram TF-IDF, robust to single-character typos.
 
-Create a local file:
+2. **Q&A gave a wrong-shaped answer on a zero count.** After a review pushed all `NEEDS_REVIEW` records elsewhere, *"how many need review?"* fell through to a generic top-10 fallback and returned unrelated records instead of saying "0." Fixed with explicit deterministic handling for count/rate questions, plus a regression test so it can't silently reappear.
 
+---
 
+## 13. Honest limitations
 
-backend/.env
+- In-memory store — batches and audit trail are lost on restart.
+- Razorpay integration is TEST-mode only (by design, refuses live keys) — no webhooks, no live payouts/refunds, no background sync; fetching is on-demand via the dashboard button.
+- Thresholds tuned by inspection, not cross-validated against a larger labeled set.
+- Re-run is only implemented for the default demo dataset; an uploaded batch is re-run by re-uploading.
+- Q&A's free-form fallback (TF-IDF) is weaker than the pattern-matched paths for genuinely novel multi-hop questions.
+- No auth on any endpoint; CORS is wide open — fine for a local demo, flagged inline as a pre-deployment TODO.
 
-Add:
+## Recommended next steps after MVP
 
-
-
-RAZORPAY_KEY_ID=your_test_key_id
-RAZORPAY_KEY_SECRET=your_test_key_secret
-
-Do not commit this file.
-
-The project .gitignore already excludes:
-
-
-
-.env
-
-Then start the backend and use the Razorpay TEST button from the dashboard.
-
-Running Tests
-
-The project currently has:
-
-
-
-84 backend tests
-
-Run:
-
-
-
-cd backend
-pytest -q
-
-Expected result:
-
-
-
-84 passed
-
-The test suite covers areas including:
-
-matching logic
-
-reconciliation scenarios
-
-validation
-
-Q&A
-
-Razorpay client
-
-Razorpay reconciliation
-
-batch persistence
-
-error handling
-
-credential protection
-
-Demo Data
-
-The project includes a synthetic data generator.
-
-The generated data intentionally contains different reconciliation scenarios such as:
-
-clean matches
-
-reference typos
-
-merchant differences
-
-narration differences
-
-truncated references
-
-amount differences
-
-date drift
-
-duplicate ledger records
-
-unmatched gateway records
-
-unmatched ledger records
-
-low-confidence cases
-
-The demo dataset is intentionally imperfect so that the reconciliation workflow can be demonstrated properly.
-
-Security
-
-SettleSense is designed as an analysis/reconciliation MVP.
-
-Important security decisions:
-
-Razorpay TEST credentials are loaded from environment variables.
-
-Live Razorpay keys are rejected.
-
-Credentials are not returned in API responses.
-
-.env is ignored by Git.
-
-Raw backend tracebacks are not returned to clients.
-
-This project is not intended to be deployed directly to production without additional security controls.
-
-Limitations
-
-This is an MVP, so there are some known limitations:
-
-Batch storage currently uses an in-memory Python store.
-
-Data and audit history are lost when the backend restarts.
-
-The demo dataset is synthetic.
-
-Matching thresholds have not been trained on a large labelled production dataset.
-
-Authentication is not implemented.
-
-CORS is currently configured for the MVP/demo environment.
-
-Re-run support is focused on the demo/default dataset.
-
-Q&A fallback is limited for completely new multi-step questions.
-
-Future Improvements
-
-Possible next steps:
-
-Replace the in-memory store with SQLite/PostgreSQL.
-
-Add authentication and reviewer identity.
-
-Improve threshold calibration using a larger labelled dataset.
-
-Persist uploaded batches for complete re-run support.
-
-Add stronger production security controls.
-
-Expand integrations with additional payment gateways.
-
-Design Principle
-
-The main principle behind SettleSense is:
-
-AI should help finance teams understand reconciliation results, not silently make financial decisions.
-
-The system therefore separates:
-
-
-
-Data
-  ↓
-Matching
-  ↓
-Classification
-  ↓
-Explanation
-  ↓
-Human Review
-  ↓
-Audit Trail
-
-Financial actions remain outside the system.
-
-Current Project Status
-
-
-
-Core reconciliation       ✅
-Multi-signal matching     ✅
-Hungarian assignment      ✅
-Synthetic CSV workflow    ✅
-Dashboard                 ✅
-Human review              ✅
-Audit trail               ✅
-Q&A                       ✅
-Razorpay TEST API         ✅
-Razorpay normalization    ✅
-Razorpay reconciliation   ✅
-Batch persistence         ✅
-Backend tests             ✅ 84/84
-Frontend build            ✅
+- Move `store.py` to SQLite/Postgres — same shape, different persistence layer.
+- Add auth + real reviewer identity (the audit trail's `reviewer` field is ready for it).
+- Cross-validate matching thresholds against a larger, ideally real, labeled dataset.
+- Extend rerun to support uploaded batches by persisting the original files.

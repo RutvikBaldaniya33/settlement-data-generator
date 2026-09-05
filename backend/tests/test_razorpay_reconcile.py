@@ -145,7 +145,7 @@ def test_endpoint_creates_a_persisted_batch_via_existing_store(monkeypatch):
     stored = main.store.get_batch(result["id"])
     assert stored is not None
     assert stored["id"] == result["id"]
-    assert stored["gateway_source"] == "razorpay"
+    assert stored["gateway_source"] == "Razorpay TEST"
     # it's listed alongside every other batch, not in a separate store
     assert any(b["id"] == result["id"] for b in main.store.list_batches())
 
@@ -172,14 +172,14 @@ def test_batch_contains_normalized_razorpay_records(monkeypatch):
     assert r["result_key"]  # persisted batches assign a real result_key
 
 
-def test_endpoint_gateway_source_is_razorpay(monkeypatch):
+def test_endpoint_gateway_source_is_razorpay_test(monkeypatch):
     main = _import_main_with_env(monkeypatch)
     fake_payments = [_razorpay_payment(id="pay_1", order_id="ORD1001")]
 
     with patch("main.razorpay_fetch_payments", return_value=fake_payments):
         result = main.razorpay_reconcile(count=1)
 
-    assert result["gateway_source"] == "razorpay"
+    assert result["gateway_source"] == "Razorpay TEST"
     assert result["gateway_count"] == 1
 
 

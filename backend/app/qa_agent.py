@@ -71,6 +71,10 @@ def _retrieve(question, results, k=10):
     if direct:
         return direct, "direct_reference"
 
+    if any(kw in ql for kw in ("analyze", "analyse", "attention", "prioritize",
+                                "priority", "finance controller")):
+        return results, "batch_priority_analysis"
+
     if "match rate" in ql:
         return results, "match_rate"
 
@@ -148,7 +152,62 @@ def _compute_aggregates(rows):
     }
 
 
+def _priority_reason(r):
+    """Explanation built ONLY from real signals/fields already on the
+    record - never invents a number or cause."""
+    s = r.get("signals") or {}
+    gw = r.get("gateway_record") or {}
+    ld = r.get("ledger_record") or {}
+    parts = []
+    if s.get("amount_difference") not in (None, 0, 0.0) and gw.get("amount") and ld.get("amount"):
+        parts.append(f"Gateway: Rs{gw['amount']}, Ledger: Rs{ld['amount']}, "
+                      f"Difference: Rs{s['amount_difference']}")
+    if not ld:
+        parts.append("No matching ledger record found")
+    elif not gw:
+        parts.append("No matching gateway record found")
+    prefix = (" | ".join(parts) + ". ") if parts else ""
+    return prefix + (r.get("reason") or "")
+
+
+def _priority_recommendation(r):
+    if _status_of(r) == STATUS_NEEDS_REVIEW:
+        return "Human review required."
+    if not r.get("ledger_record"):
+        return "Investigate ledger entry."
+    if not r.get("gateway_record"):
+        return "Investigate gateway/settlement entry."
+    return "Review this exception manually."
+
+
+def _batch_priority_analysis_answer(all_results):
+    agg = _compute_aggregates(all_results)
+    lines = [
+        "Batch analyzed.",
+        "",
+        f"Total records: {agg['count']}",
+        f"Matched: {agg['by_status'][STATUS_MATCHED]}",
+        f"Needs Review: {agg['by_status'][STATUS_NEEDS_REVIEW]}",
+        f"Exceptions: {agg['by_status'][STATUS_EXCEPTION]}",
+        "",
+    ]
+    priority = [r for r in all_results if _status_of(r) in (STATUS_NEEDS_REVIEW, STATUS_EXCEPTION)]
+    priority.sort(key=lambda r: abs((r.get("signals") or {}).get("amount_difference") or 0), reverse=True)
+    if not priority:
+        lines.append("No records currently need attention - everything is matched.")
+    else:
+        lines.append("Priority items:")
+        for i, r in enumerate(priority[:5], 1):
+            lines.append(f"\n{i}. {r['order_ref']}")
+            lines.append(f"   Reason: {_priority_reason(r)}")
+            lines.append(f"   Recommendation: {_priority_recommendation(r)}")
+    return "\n".join(lines)
+
+
 def _template_answer(question, rows, retrieval_mode, all_results):
+    if retrieval_mode == "batch_priority_analysis":
+        return _batch_priority_analysis_answer(all_results)
+
     if retrieval_mode == "direct_reference" and rows:
         r = rows[0]
         return (f"{r['order_ref']} is currently **{_status_of(r)}** "
@@ -248,7 +307,7 @@ def _call_llm(question, context_cards):
 
 
 DETERMINISTIC_MODES = {
-    "totals_comparison", "match_rate",
+    "totals_comparison", "match_rate", "batch_priority_analysis",
     "status_count_review", "status_count_exception", "status_count_matched",
 }
 
