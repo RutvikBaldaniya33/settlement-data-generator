@@ -15,15 +15,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(__file__))
-from matching import reconcile
+from matching import reconcile, reconcile_records
 from qa_agent import ask as qa_ask
 from validation import validate_csv
+from normalize import normalize_gateway_row, load_ledger_records
 from razorpay_client import (
     test_connection as razorpay_test_connection,
     fetch_payments as razorpay_fetch_payments,
-    RazorpayConfigError,
-    RazorpayAuthError,
-    RazorpayAPIError,
+    RazorpayConfigError, RazorpayAuthError, RazorpayAPIError,
 )
 import store
 
@@ -80,6 +79,15 @@ def _batch_view(batch: dict) -> dict:
     total = len(results)
 
     def amt(r):
+        # Prefer the canonical, already source-normalized amount (rupees,
+        # gateway-preferred else ledger) set by matching.py at reconciliation
+        # time. This matters because gateway_record["amount"]/ledger_record
+        # ["amount"] are the untouched RAW source values for audit purposes —
+        # for a synthetic CSV that's rupees already, but for a Razorpay
+        # payment it's paise, so falling back to reading those directly
+        # would silently be 100x too large for Razorpay-sourced batches.
+        if r.get("amount") is not None:
+            return r["amount"]
         gw = r.get("gateway_record") or {}
         ld = r.get("ledger_record") or {}
         try:
@@ -128,6 +136,43 @@ def razorpay_connection_check():
         raise HTTPException(401, str(e))
     except RazorpayAPIError as e:
         raise HTTPException(502, str(e))
+
+
+@app.get("/api/razorpay/reconcile")
+def razorpay_reconcile(
+    count: int = Query(10, ge=1, le=100, description="Number of recent Razorpay TEST payments to fetch"),
+):
+    """Fetches a handful of real Razorpay TEST-mode payments, normalizes them
+    into NormalizedRecords (normalize.py), and runs them through the SAME
+    reconciliation engine used for the synthetic CSV flow
+    (matching.reconcile_records) — matched against the existing default
+    synthetic ledger, since no Razorpay ledger source exists yet.
+
+    The result is persisted as a normal batch via the existing
+    store.create_batch()/_batch_view() infrastructure — the same one the
+    CSV upload flow uses — so it immediately works with batch detail,
+    human review, audit trail, re-run (where supported), and dashboard
+    batch loading, with no special-casing needed anywhere else. The
+    gateway source is recorded as "razorpay"; the ledger source is
+    recorded as the existing default demo ledger file, same as the
+    default CSV batch. Never returns Razorpay credentials — only
+    Razorpay's own (non-secret) payment data and the reconciliation
+    result."""
+    try:
+        raw_payments = razorpay_fetch_payments(count=count)
+    except RazorpayConfigError as e:
+        raise HTTPException(400, str(e))
+    except RazorpayAuthError as e:
+        raise HTTPException(401, str(e))
+    except RazorpayAPIError as e:
+        raise HTTPException(502, str(e))
+
+    gateway_records = [normalize_gateway_row(p, source="razorpay") for p in raw_payments]
+    ledger_records = load_ledger_records(DEFAULT_LEDGER_CSV, source="synthetic")
+
+    out = reconcile_records(gateway_records, ledger_records)
+    batch = store.create_batch(out, "razorpay", "internal_ledger.csv (default)")
+    return _batch_view(batch)
 
 
 # ---- Upload & validation ---------------------------------------------------
@@ -314,17 +359,3 @@ def ask_question(req: AskRequest, batch_id: str = None):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-@app.get("/api/razorpay/payments")
-def razorpay_payments(count: int = 10):
-    try:
-        return razorpay_fetch_payments(count)
-
-    except RazorpayConfigError as e:
-        raise HTTPException(400, str(e))
-
-    except RazorpayAuthError as e:
-        raise HTTPException(401, str(e))
-
-    except RazorpayAPIError as e:
-        raise HTTPException(502, str(e))

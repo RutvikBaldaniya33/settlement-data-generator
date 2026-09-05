@@ -226,3 +226,87 @@ def test_normalize_module_does_not_import_razorpay_client():
         src = f.read()
     assert "import razorpay" not in src
     assert "razorpay_client." not in src
+
+
+# --------------------------------------------------------------------------
+# fetch_payments() — used by the /api/razorpay/reconcile integration
+# --------------------------------------------------------------------------
+
+def test_fetch_payments_missing_credentials_raise_config_error(monkeypatch):
+    _clear_env(monkeypatch)
+    with pytest.raises(rzp.RazorpayConfigError):
+        rzp.fetch_payments(count=5)
+
+
+@patch("razorpay_client.requests.get")
+def test_fetch_payments_config_errors_never_make_a_network_call(mock_get, monkeypatch):
+    _clear_env(monkeypatch)
+    with pytest.raises(rzp.RazorpayConfigError):
+        rzp.fetch_payments(count=5)
+    mock_get.assert_not_called()
+
+
+@patch("razorpay_client.requests.get")
+def test_fetch_payments_returns_raw_items_list(mock_get, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", TEST_KEY_ID)
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", TEST_KEY_SECRET)
+
+    raw_items = [
+        {"id": "pay_1", "order_id": "ORD1", "amount": "150050", "created_at": 1751328000},
+        {"id": "pay_2", "order_id": "ORD2", "amount": "200000", "created_at": 1751328000},
+    ]
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"items": raw_items}
+    mock_get.return_value = mock_resp
+
+    result = rzp.fetch_payments(count=2)
+
+    assert result == raw_items
+    _, kwargs = mock_get.call_args
+    assert kwargs["params"] == {"count": 2}
+    assert kwargs["auth"] == (TEST_KEY_ID, TEST_KEY_SECRET)
+    assert TEST_KEY_SECRET not in str(result)
+
+
+@patch("razorpay_client.requests.get")
+def test_fetch_payments_401_raises_auth_error(mock_get, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", TEST_KEY_ID)
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "wrongsecret")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_get.return_value = mock_resp
+
+    with pytest.raises(rzp.RazorpayAuthError):
+        rzp.fetch_payments(count=5)
+
+
+@patch("razorpay_client.requests.get")
+def test_fetch_payments_non_json_success_body_raises_api_error(mock_get, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", TEST_KEY_ID)
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", TEST_KEY_SECRET)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.side_effect = ValueError("not json")
+    mock_get.return_value = mock_resp
+
+    with pytest.raises(rzp.RazorpayAPIError):
+        rzp.fetch_payments(count=5)
+
+
+@patch("razorpay_client.requests.get")
+def test_fetch_payments_timeout_raises_api_error(mock_get, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", TEST_KEY_ID)
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", TEST_KEY_SECRET)
+
+    import requests
+    mock_get.side_effect = requests.exceptions.Timeout()
+
+    with pytest.raises(rzp.RazorpayAPIError, match="Timed out"):
+        rzp.fetch_payments(count=5)

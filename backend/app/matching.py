@@ -48,7 +48,7 @@ from config import (
     AUTO_MATCH_THRESHOLD, NEEDS_REVIEW_THRESHOLD, CANDIDATE_FLOOR,
     STATUS_MATCHED, STATUS_NEEDS_REVIEW, STATUS_EXCEPTION,
 )
-from normalize import load_gateway_records, load_ledger_records, safe_float as _safe_float
+from normalize import load_gateway_records, load_ledger_records
 
 
 @dataclass
@@ -63,6 +63,11 @@ class MatchResult:
     signals: dict = field(default_factory=dict)
     gateway_record: dict = field(default_factory=dict)
     ledger_record: dict = field(default_factory=dict)
+    amount: Optional[float] = None  # canonical, already source-normalized rupee
+                                     # amount (gateway preferred, else ledger) -
+                                     # NOT the same as gateway_record["amount"],
+                                     # which is the untouched raw source value
+                                     # (e.g. paise for Razorpay) kept for audit.
 
 
 def _text_sim_matrix(texts_a, texts_b):
@@ -122,12 +127,28 @@ def _classify(confidence):
 
 
 def reconcile(gateway_path, ledger_path, gateway_source="synthetic", ledger_source="synthetic"):
-    """gateway_source / ledger_source select which normalize.py adapter reads
-    the CSVs (see normalize.py). Defaults to "synthetic" — today's only
-    registered source — so existing callers are unaffected. This is the seam
-    a future Razorpay source plugs into, without changing anything below."""
+    """Loads gateway/ledger CSVs via normalize.py's adapters, then hands the
+    normalized records to reconcile_records() for the actual matching.
+    gateway_source / ledger_source select which normalize.py adapter reads
+    each CSV. Defaults to "synthetic" — today's CSV flow — so existing
+    callers are unaffected."""
     gateway = load_gateway_records(gateway_path, source=gateway_source)
     ledger = load_ledger_records(ledger_path, source=ledger_source)
+    return reconcile_records(gateway, ledger)
+
+
+def reconcile_records(gateway, ledger):
+    """The reconciliation engine itself, decoupled from CSV loading.
+
+    Takes two lists of already-normalized NormalizedRecord objects (see
+    normalize.py) — one for gateway records, one for ledger records — and
+    runs the exact same scoring/assignment/classification logic as
+    reconcile(). This function has no idea whether a NormalizedRecord came
+    from the synthetic CSV adapter, the Razorpay payment adapter, or any
+    future source; that is the whole point of normalize.py's design. It
+    reads only the canonical NormalizedRecord fields (order_ref, merchant,
+    narration, amount, date, id), never a source-specific raw dict key.
+    """
     m, n = len(gateway), len(ledger)
 
     gw_ref = [r.order_ref for r in gateway]
@@ -172,11 +193,21 @@ def reconcile(gateway_path, ledger_path, gateway_source="synthetic", ledger_sour
     results = []
     used_ledger = set(matched_pairs.values())
 
+    # Amount-bucket running totals, accumulated from the already-parsed
+    # (and, for Razorpay, already paise->rupee converted) NormalizedRecord
+    # amounts — not re-read from the raw gateway_record/ledger_record dicts,
+    # whose "amount" key means something different per source (rupees as a
+    # CSV string for synthetic, paise as an int for Razorpay).
+    matched_amount_acc = 0.0
+    needs_review_amount_acc = 0.0
+    exception_amount_acc = 0.0
+
     for i, gw_norm in enumerate(gateway):
         gw = gw_norm.raw  # original raw row — output contract (gateway_record) is unchanged
         if i in matched_pairs:
             j = matched_pairs[i]
-            ld = ledger[j].raw
+            ld_norm = ledger[j]
+            ld = ld_norm.raw
             conf = float(confidence[i, j])
             status = _classify(conf)
             amt_diff = None
@@ -218,49 +249,61 @@ def reconcile(gateway_path, ledger_path, gateway_source="synthetic", ledger_sour
                     reason_parts.append("Below the review bar - treated as a genuine exception "
                                          "despite a candidate existing.")
 
+            pair_amount = gw_amt[i] if gw_amt[i] is not None else lg_amt[j]
+
             results.append(MatchResult(
-                gateway_id=gw["settlement_id"], ledger_id=ld["entry_id"],
-                order_ref=gw["order_ref"], status=status, confidence=round(conf, 3),
+                gateway_id=gw_norm.id, ledger_id=ld_norm.id,
+                order_ref=gw_norm.order_ref, status=status, confidence=round(conf, 3),
                 method="matched_pair", reason=" ".join(reason_parts),
                 signals=signals, gateway_record=gw, ledger_record=ld,
+                amount=pair_amount,
             ))
+
+            pair_amount = pair_amount or 0
+            if status == STATUS_MATCHED:
+                matched_amount_acc += pair_amount
+            elif status == STATUS_NEEDS_REVIEW:
+                needs_review_amount_acc += pair_amount
+            else:
+                exception_amount_acc += pair_amount
         else:
             results.append(MatchResult(
-                gateway_id=gw["settlement_id"], ledger_id=None,
-                order_ref=gw["order_ref"], status=STATUS_EXCEPTION, confidence=0.0,
+                gateway_id=gw_norm.id, ledger_id=None,
+                order_ref=gw_norm.order_ref, status=STATUS_EXCEPTION, confidence=0.0,
                 method="none",
                 reason="No eligible ledger candidate was found within the configured "
                        "matching constraints (reference/merchant/narration similarity, "
                        "amount tolerance, date window). Possible causes: missing ledger "
                        "booking, incorrect reference, or a mismatch beyond configured tolerances.",
                 signals={}, gateway_record=gw, ledger_record={},
+                amount=gw_amt[i],
             ))
+            exception_amount_acc += (gw_amt[i] or 0)
 
     for j, ld_norm in enumerate(ledger):
         if j not in used_ledger:
             ld = ld_norm.raw  # original raw row — output contract (ledger_record) is unchanged
             results.append(MatchResult(
-                gateway_id="", ledger_id=ld["entry_id"], order_ref=ld["order_ref"],
+                gateway_id="", ledger_id=ld_norm.id, order_ref=ld_norm.order_ref,
                 status=STATUS_EXCEPTION, confidence=0.0, method="none",
                 reason="No eligible gateway settlement was found within the configured "
                        "matching constraints. Possible causes: failed payout, duplicate "
                        "booking, or a mismatch beyond configured tolerances.",
                 signals={}, gateway_record={}, ledger_record=ld,
+                amount=lg_amt[j],
             ))
+            exception_amount_acc += (lg_amt[j] or 0)
 
     total = len(results)
     matched = sum(1 for r in results if r.status == STATUS_MATCHED)
     needs_review = sum(1 for r in results if r.status == STATUS_NEEDS_REVIEW)
     exceptions = sum(1 for r in results if r.status == STATUS_EXCEPTION)
 
-    def amt_of(r):
-        return _safe_float(r.gateway_record.get("amount") or r.ledger_record.get("amount"), 0) or 0
-
     gateway_total = round(sum(r.amount or 0 for r in gateway), 2)
     ledger_total = round(sum(r.amount or 0 for r in ledger), 2)
-    matched_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_MATCHED), 2)
-    needs_review_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_NEEDS_REVIEW), 2)
-    exception_amount = round(sum(amt_of(r) for r in results if r.status == STATUS_EXCEPTION), 2)
+    matched_amount = round(matched_amount_acc, 2)
+    needs_review_amount = round(needs_review_amount_acc, 2)
+    exception_amount = round(exception_amount_acc, 2)
 
     summary = {
         "total_records": total,

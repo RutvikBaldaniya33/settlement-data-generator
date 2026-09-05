@@ -1,24 +1,27 @@
 """
-SettleSense — Razorpay TEST MODE integration (Step 3: connection only).
+SettleSense — Razorpay TEST MODE integration.
 
 This is the ONLY module in the backend that talks to Razorpay. Nothing in
-matching.py, normalize.py, or main.py's core reconciliation flow knows
-Razorpay exists — this module exists precisely so that stays true.
+matching.py or normalize.py knows Razorpay exists as an HTTP API — this
+module exists precisely so that stays true. normalize.py's Razorpay adapter
+only transforms already-fetched dicts (produced by fetch_payments() below);
+it never calls out to Razorpay itself.
 
 What this module does:
   - reads RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET from environment variables
     (never hard-coded, never logged, never returned to any caller)
   - refuses to proceed if the configured key looks like a LIVE mode key
     (rzp_live_...) — this integration is TEST MODE ONLY, by design
-  - exposes test_connection(), a single lightweight authenticated call to
-    Razorpay's API that proves the credentials actually work
+  - exposes test_connection(), a lightweight authenticated call that proves
+    the credentials work, without returning any payment data
+  - exposes fetch_payments(count), which fetches a small number of raw
+    TEST-mode payments as-is (no normalization, no reconciliation — those
+    live in normalize.py and matching.py respectively)
 
-What this module deliberately does NOT do yet (out of scope for Step 3):
-  - fetch or reconcile any real settlement/payment data
+What this module deliberately does NOT do:
+  - normalize or reconcile anything — it only fetches
   - register or handle webhooks
-  - get imported by matching.py, normalize.py, or any reconciliation code
-    (a future Razorpay `normalize.py` adapter would call INTO this module
-    to fetch raw rows, never the other way around)
+  - get imported by matching.py or any reconciliation code
 """
 import os
 import requests
@@ -83,22 +86,16 @@ def _mask(key_id: str) -> str:
     return f"{key_id[:8]}...{key_id[-4:]}"
 
 
-def test_connection() -> dict:
-    """One lightweight authenticated GET against Razorpay TEST mode, just to
-    confirm the configured credentials work. Does not fetch or return any
-    payment/settlement data beyond the fact that the call succeeded.
-
-    Raises:
-        RazorpayConfigError  - credentials missing or not a test-mode key
-        RazorpayAuthError    - credentials rejected by Razorpay
-        RazorpayAPIError     - network failure or an unexpected API error
-    """
-    key_id, key_secret = _get_credentials()
-
+def _get(path: str, params: dict, key_id: str, key_secret: str):
+    """One GET request to the Razorpay API. Translates network-level
+    failures (timeout, DNS, connection refused, ...) into RazorpayAPIError.
+    Does NOT inspect the HTTP status code — callers do that themselves via
+    _raise_for_error_status(), since a 200 vs non-200 response needs
+    different handling per endpoint."""
     try:
-        resp = requests.get(
-            f"{RAZORPAY_API_BASE}/payments",
-            params={"count": 1},
+        return requests.get(
+            f"{RAZORPAY_API_BASE}{path}",
+            params=params,
             auth=(key_id, key_secret),
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
@@ -109,13 +106,10 @@ def test_connection() -> dict:
     except requests.exceptions.RequestException as e:
         raise RazorpayAPIError(f"Unexpected error contacting Razorpay: {e}")
 
-    if resp.status_code == 200:
-        return {
-            "connected": True,
-            "mode": "test",
-            "key_id": _mask(key_id),
-        }
 
+def _raise_for_error_status(resp):
+    """Raises RazorpayAuthError / RazorpayAPIError for a non-200 response.
+    Callers only reach this after already handling the 200 case themselves."""
     if resp.status_code in (401, 403):
         raise RazorpayAuthError(
             "Razorpay rejected the configured credentials (authentication "
@@ -132,66 +126,51 @@ def test_connection() -> dict:
         f"Razorpay API returned HTTP {resp.status_code}" + (f": {detail}" if detail else ".")
     )
 
-def fetch_payments(count: int = 10) -> dict:
-    """Fetch payment records from Razorpay TEST mode.
 
-    Returns the raw Razorpay response in a controlled form.
-    The API credentials are never returned.
+def test_connection() -> dict:
+    """One lightweight authenticated GET against Razorpay TEST mode, just to
+    confirm the configured credentials work. Does not fetch or return any
+    payment/settlement data beyond the fact that the call succeeded.
 
     Raises:
-        RazorpayConfigError - credentials missing/invalid
-        RazorpayAuthError   - Razorpay rejected credentials
-        RazorpayAPIError    - network/API failure
+        RazorpayConfigError  - credentials missing or not a test-mode key
+        RazorpayAuthError    - credentials rejected by Razorpay
+        RazorpayAPIError     - network failure or an unexpected API error
     """
     key_id, key_secret = _get_credentials()
+    resp = _get("/payments", {"count": 1}, key_id, key_secret)
 
-    if count < 1 or count > 100:
-        raise RazorpayConfigError("count must be between 1 and 100.")
+    if resp.status_code == 200:
+        return {
+            "connected": True,
+            "mode": "test",
+            "key_id": _mask(key_id),
+        }
 
-    try:
-        resp = requests.get(
-            f"{RAZORPAY_API_BASE}/payments",
-            params={"count": count},
-            auth=(key_id, key_secret),
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-        )
-    except requests.exceptions.Timeout:
-        raise RazorpayAPIError(
-            "Timed out connecting to Razorpay. Check your network and try again."
-        )
-    except requests.exceptions.ConnectionError:
-        raise RazorpayAPIError(
-            "Could not reach Razorpay's API (connection error). Check your network."
-        )
-    except requests.exceptions.RequestException as e:
-        raise RazorpayAPIError(f"Unexpected error contacting Razorpay: {e}")
+    _raise_for_error_status(resp)
+
+
+def fetch_payments(count: int = 10) -> list:
+    """Fetches up to `count` recent TEST-mode payments from Razorpay and
+    returns them exactly as Razorpay's API returns them (a list of raw
+    payment dicts). This function ONLY fetches — it does not normalize
+    (see normalize.py's `_normalize_razorpay_payment_row`) and does not
+    reconcile (see matching.py). Never returns credentials; the raw
+    payment dicts themselves are Razorpay's own response body.
+
+    Raises:
+        RazorpayConfigError  - credentials missing or not a test-mode key
+        RazorpayAuthError    - credentials rejected by Razorpay
+        RazorpayAPIError     - network failure, or an unexpected/non-JSON
+                                API response
+    """
+    key_id, key_secret = _get_credentials()
+    resp = _get("/payments", {"count": count}, key_id, key_secret)
 
     if resp.status_code == 200:
         try:
-            data = resp.json()
+            return resp.json().get("items", [])
         except ValueError:
-            raise RazorpayAPIError(
-                "Razorpay returned an invalid JSON response."
-            )
+            raise RazorpayAPIError("Razorpay returned a non-JSON response for /payments.")
 
-        return {
-            "mode": "test",
-            "count": len(data.get("items", [])),
-            "items": data.get("items", []),
-        }
-
-    if resp.status_code in (401, 403):
-        raise RazorpayAuthError(
-            "Razorpay rejected the configured credentials."
-        )
-
-    detail = None
-    try:
-        detail = resp.json().get("error", {}).get("description")
-    except ValueError:
-        pass
-
-    raise RazorpayAPIError(
-        f"Razorpay API returned HTTP {resp.status_code}"
-        + (f": {detail}" if detail else ".")
-    )
+    _raise_for_error_status(resp)

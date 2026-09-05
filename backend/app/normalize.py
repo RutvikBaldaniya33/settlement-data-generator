@@ -2,23 +2,26 @@
 SettleSense — common normalized transaction/settlement structure.
 
 matching.py should never need to know whether a record came from the
-shipped synthetic dataset, a Razorpay settlement report, or any other
-future source. This module is the single place that translates a
+shipped synthetic dataset, a Razorpay payment, or any other future
+source. This module is the single place that translates a
 source-specific row (whatever columns/format that source uses) into one
 canonical `NormalizedRecord` shape that the reconciliation engine (and
 only the reconciliation engine) actually operates on.
 
-Adding a new source later — Razorpay, another gateway, a different ledger
-export — means adding one small adapter function here (e.g.
-`_normalize_razorpay_settlement_row`) and registering it in
-GATEWAY_ADAPTERS / LEDGER_ADAPTERS. It does NOT mean touching matching.py,
-its scoring logic, or its thresholds. That's the whole point of this file.
+Currently supported adapters:
+  - "synthetic" — maps the shipped CSV columns (settlement_id/entry_id,
+    order_ref, merchant, amount, date, narration) into the canonical
+    shape.
+  - "razorpay" — maps a raw Razorpay Payment object (as fetched via the
+    dedicated Razorpay client module) into the canonical shape. Razorpay
+    payment normalization is implemented; fetching/reconciling that data
+    end-to-end is a separate, later concern.
 
-NOT part of this change: no Razorpay adapter is implemented yet. Only the
-"synthetic" adapter exists today, mapping the current CSV columns
-(settlement_id/entry_id, order_ref, merchant, amount, date, narration)
-into the canonical shape. This keeps today's behavior byte-for-byte
-identical while making the seam explicit for later.
+Adding another new source later — a different gateway, a different
+ledger export — means adding one small adapter function here and
+registering it in GATEWAY_ADAPTERS / LEDGER_ADAPTERS. It does NOT mean
+touching matching.py, its scoring logic, or its thresholds. That's the
+whole point of this file.
 """
 from __future__ import annotations
 import csv
@@ -100,10 +103,50 @@ def _normalize_synthetic_ledger_row(raw: dict) -> NormalizedRecord:
     )
 
 
-# Registries — add a new source by adding one adapter and one entry here.
-# e.g. GATEWAY_ADAPTERS["razorpay"] = _normalize_razorpay_settlement_row
+def _normalize_razorpay_payment_row(raw: dict) -> NormalizedRecord:
+    """Maps one raw Razorpay Payment object (as returned by the Razorpay API
+    via the dedicated Razorpay client module) into the canonical
+    NormalizedRecord shape.
+
+    This function only transforms an already-fetched dict; it makes no API
+    calls itself and never touches credentials.
+
+    Note on `merchant`: a Razorpay Payment object has no field that
+    identifies a merchant (the payment already belongs to your own
+    account) - the only per-payment identifier close to it is the
+    customer's `email`, which is sensitive customer PII, not merchant
+    information. Rather than invent a merchant name or expose that PII
+    unnecessarily, this leaves `merchant` empty for Razorpay records.
+    """
+    raw_amount = safe_float(raw.get("amount"))
+    amount = round(raw_amount / 100, 2) if raw_amount is not None else None
+
+    date = None
+    created_at = raw.get("created_at")
+    if created_at is not None:
+        try:
+            date = datetime.fromtimestamp(float(created_at))
+        except (TypeError, ValueError, OSError, OverflowError):
+            date = None
+
+    return NormalizedRecord(
+        id=raw.get("id", ""),
+        order_ref=raw.get("order_id") or "",
+        merchant="",  # see docstring - no non-sensitive merchant field exists
+        narration=raw.get("description") or "",
+        amount=amount,
+        date=date,
+        record_type="gateway",
+        source="razorpay",
+        raw=raw,
+    )
+
+
+# Registries — "synthetic" and "razorpay" are registered below. Add another
+# source later by adding one adapter function and one entry here.
 GATEWAY_ADAPTERS = {
     "synthetic": _normalize_synthetic_gateway_row,
+    "razorpay": _normalize_razorpay_payment_row,
 }
 LEDGER_ADAPTERS = {
     "synthetic": _normalize_synthetic_ledger_row,
